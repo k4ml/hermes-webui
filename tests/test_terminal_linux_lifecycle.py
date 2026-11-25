@@ -112,6 +112,60 @@ def test_terminal_spawn_delegates_popen_to_supervisor_thread(monkeypatch, tmp_pa
         close_terminal(sid)
 
 
+def test_terminal_spawn_makes_pty_the_controlling_terminal(monkeypatch, tmp_path):
+    """A login shell that requires a controlling tty dies instantly without one.
+
+    fish exits 1 right after /api/terminal/start with "No TTY for interactive
+    shell (tcgetpgrp failed)", so /api/terminal/output 404s and the pane shows
+    "[terminal disconnected]". Guard the invariant directly: the spawned child
+    must lead its own session AND see the pty as its controlling terminal
+    (os.tcgetpgrp(0) == its pgid). start_new_session=True alone still yields
+    session_leader=True but ctty=False — exactly the pre-fix regression.
+    """
+    import api.terminal as terminal
+    from api.terminal import close_terminal, start_terminal
+
+    client = (
+        "import os\n"
+        "pid, pgid = os.getpid(), os.getpgrp()\n"
+        "session_leader = os.getsid(0) == pgid == pid\n"
+        "try:\n"
+        "    ctty = os.tcgetpgrp(0) == pgid\n"
+        "except OSError:\n"
+        "    ctty = False\n"
+        "print('CTTY_OK' if session_leader and ctty else 'CTTY_BROKEN')\n"
+    )
+    monkeypatch.setattr(
+        terminal, "_shell_argv", lambda shell: [sys.executable, "-c", client]
+    )
+
+    sid = f"terminal-ctty-{os.getpid()}-{id(tmp_path)}"
+    term = start_terminal(sid, tmp_path, rows=8, cols=40, restart=True)
+    try:
+        assert term.is_alive()
+        out = term.subscribe()
+        deadline = time.monotonic() + 10.0
+        seen = ""
+        while time.monotonic() < deadline:
+            try:
+                _seq, event, payload = out.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if event in ("output", "terminal_closed", "terminal_error"):
+                seen += payload.get("text", "")
+                if "CTTY_OK" in seen or "CTTY_BROKEN" in seen:
+                    break
+        if "CTTY_OK" not in seen:
+            assert "CTTY_BROKEN" not in seen, (
+                "spawned child has no controlling terminal (tcgetpgrp failed): "
+                "start_new_session-only regression — fish would die instantly"
+            )
+            raise AssertionError(f"child produced no ctty verdict: {seen or 'no output'}")
+        term.unsubscribe(out)
+    finally:
+        close_terminal(sid)
+
+
 def test_terminal_supervisor_handles_concurrent_spawns(tmp_path):
     from api.terminal import close_terminal, start_terminal
 

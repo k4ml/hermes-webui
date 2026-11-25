@@ -322,6 +322,30 @@ if _TERMINAL_SUPPORTED:
 # `atexit.register(close_all_terminals)` and the explicit `close_terminal`
 # call sites; hard kills of the WebUI process leak the shell, which is the
 # tradeoff for working on Linux at all.
+#
+# ``preexec_fn`` itself is fine *now* because every spawn runs on the
+# long-lived _spawn_supervisor thread above; what must never move back to
+# per-request threads is *per-thread* child setup (PDEATHSIG).  _make_ctty
+# only sets per-child state.
+
+
+def _make_ctty() -> None:
+    """Child-side preexec: become a session leader and adopt the slave pty.
+
+    ``start_new_session=True`` only calls setsid(), which does NOT make the
+    inherited (dup2'd) slave fd a controlling terminal, so the child tty has
+    no foreground process group.  bash tolerates that; fish does not — it
+    exits 1 with "warning: No TTY for interactive shell (tcgetpgrp failed)"
+    before the first output poll, i.e. /api/terminal/start -> 200 then
+    /api/terminal/output -> 404 ("[terminal disconnected]" in the pane).
+
+    Target fd 0, not the caller's slave fd number: this runs after the dup2s
+    and after close_fds, so the original fd number may already be closed.
+    """
+    if not (_TERMINAL_SUPPORTED and fcntl and termios):
+        return
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
 def _decode_terminal_output(decoder, data: bytes) -> str:
@@ -589,8 +613,12 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
                 "stdout": slave_fd,
                 "stderr": slave_fd,
                 "close_fds": True,
-                # Required so cleanup can signal the whole interactive shell tree.
-                "start_new_session": True,
+                # Keep the shell its own session leader (so cleanup can signal
+                # the whole interactive shell tree) AND make the slave pty its
+                # controlling terminal: fish exits instantly under plain
+                # start_new_session=True (no ctty -> tcgetpgrp fails).  See
+                # _make_ctty; called on the long-lived supervisor thread.
+                "preexec_fn": _make_ctty,
             }
         )
         _ensure_spawn_supervisor()
