@@ -113,14 +113,15 @@ def test_terminal_spawn_delegates_popen_to_supervisor_thread(monkeypatch, tmp_pa
 
 
 def test_terminal_spawn_makes_pty_the_controlling_terminal(monkeypatch, tmp_path):
-    """A login shell that requires a controlling tty dies instantly without one.
+    """A login shell that needs a controlling tty dies instantly without one.
 
     fish exits 1 right after /api/terminal/start with "No TTY for interactive
-    shell (tcgetpgrp failed)", so /api/terminal/output 404s and the pane shows
-    "[terminal disconnected]". Guard the invariant directly: the spawned child
-    must lead its own session AND see the pty as its controlling terminal
-    (os.tcgetpgrp(0) == its pgid). start_new_session=True alone still yields
-    session_leader=True but ctty=False — exactly the pre-fix regression.
+    shell (tcgetpgrp failed)", so the first /api/terminal/output call returns
+    404 and the pane shows "[terminal disconnected]". The spawned child must
+    lead its own session and see the pty as its controlling terminal
+    (os.tcgetpgrp(0) == its pgid). start_new_session=True alone still sets
+    session_leader=True but leaves the controlling terminal unset, which is
+    the pre-fix regression.
     """
     import api.terminal as terminal
     from api.terminal import close_terminal, start_terminal
